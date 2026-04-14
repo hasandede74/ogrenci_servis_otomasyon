@@ -427,23 +427,34 @@ def otomasyon_calistir(driver, ogr_sozluk):
     bugun = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     print(f"\nBugunun tarihi: {bugun.strftime('%d.%m.%Y')}")
 
-    # Rapor yapisi
     rapor = {
-        "servis_raporu": [],      # Her servis icin {servis, durum, aciklama}
-        "ogrenci_raporu": {},     # {ogr_adi: {servis, durum}}
+        "servis_raporu": [],
+        "ogrenci_raporu": {},
         "hatalar": []
     }
 
-    # Excel'deki tum ogrencileri "islenmedi" olarak baslat
+    # Excel'deki tum ogrencileri baslangicta "Yerlestirilmedi" olarak isaretle
     for (e_sofor, e_plaka), ogrenciler in ogr_sozluk.items():
         for ogr in ogrenciler:
-            rapor["ogrenci_raporu"][ogr] = {"servis": f"{e_sofor} / {e_plaka}", "durum": "Yerlestirilmedi"}
+            rapor["ogrenci_raporu"][ogr] = {
+                "servis": f"{e_sofor} / {e_plaka}",
+                "durum": "Yerlestirilmedi"
+            }
 
-    # Hangi servisler zaten islendi (tekrar islemeyi onlemek icin)
-    islenen_servisler = set()
+    # Sadece basariyla tamamlanan Excel anahtarlari buraya girer
+    tamamlanan_excel_servisleri = set()
 
     while True:
-        print("\n--- Ana tablo okunuyor... ---")
+        # Excel'de bekleyen servis var mi?
+        bekleyenler = [
+            k for k in ogr_sozluk.keys()
+            if f"{k[0]} / {k[1]}" not in tamamlanan_excel_servisleri
+        ]
+        if not bekleyenler:
+            print("\nExcel'deki tum servisler tamamlandi.")
+            break
+
+        print(f"\n--- Ana tablo okunuyor... (Bekleyen: {len(bekleyenler)}) ---")
         try:
             satirlar = ana_tablo_satirlarini_oku(driver)
         except Exception as e:
@@ -452,23 +463,12 @@ def otomasyon_calistir(driver, ogr_sozluk):
             break
 
         if not satirlar:
-            print("Tabloda islenecek satir bulunamadi.")
+            print("Tabloda satir bulunamadi.")
             break
 
-        print(f"Toplam {len(satirlar)} satir bulundu.")
+        print(f"Toplam {len(satirlar)} web satiri bulundu.")
 
-        # Excel'de islenmesi gereken servisler hepsi bitti mi?
-        bekleyen_servisler = []
-        for (e_sofor, e_plaka) in ogr_sozluk.keys():
-            anahtar = f"{e_sofor} / {e_plaka}"
-            if anahtar not in islenen_servisler:
-                bekleyen_servisler.append(anahtar)
-
-        if not bekleyen_servisler:
-            print("Excel'deki tum servisler islendi. Otomasyon tamamlandi.")
-            break
-
-        isleme_yapildi = False
+        islem_yapildi_bu_tur = False
 
         for idx, satir in enumerate(satirlar):
             plaka      = satir["plaka"]
@@ -477,103 +477,79 @@ def otomasyon_calistir(driver, ogr_sozluk):
             sofor_bit  = satir["sofor_bit"]
             servis_key = f"{sofor} / {plaka}"
 
-            # Zaten islendiyse atla
-            if servis_key in islenen_servisler:
-                continue
-
-            # --- Tarih kontrolu ---
+            # --- Tarih kontrolu: gecersizse bu satiri atla, baska bir sey yapma ---
             if sofor_bas is None or sofor_bit is None:
-                rapor["servis_raporu"].append({
-                    "servis": servis_key,
-                    "durum": "ATLANDI",
-                    "aciklama": f"Tarih parse edilemedi ({satir['sofor_bas_str']} - {satir['sofor_bit_str']})"
-                })
-                islenen_servisler.add(servis_key)
+                print(f"  [{idx+1}] {servis_key}: Tarih okunamadi, atlandi.")
                 continue
 
             if not (sofor_bas <= bugun <= sofor_bit):
-                # Sadece bu site satirini islenmiş say, Excel anahtarini ekleme!
-                # Boylece ayni soforun gecerli tarihli satiri atlanmaz.
-                islenen_servisler.add(servis_key)
-                rapor["servis_raporu"].append({
-                    "servis": servis_key,
-                    "durum": "ATLANDI",
-                    "aciklama": f"Tarih araligi disinda ({satir['sofor_bas_str']} - {satir['sofor_bit_str']})"
-                })
-                print(f"  [{idx+1}] {servis_key}: Tarih araligi disinda, atlandi.")
+                print(f"  [{idx+1}] {servis_key}: Tarih disinda ({satir['sofor_bas_str']} - {satir['sofor_bit_str']}), atlandi.")
                 continue
 
-            # --- Excel eslesmesi: once plaka+sofor, sonra sadece plaka ---
+            # --- Tarih uygun: Excel'de eslesme ara ---
             ogr_listesi = None
             eslesme_key = None
+
+            # 1. Once tam eslesme (sofor + plaka)
             for (e_sofor, e_plaka), ogrenciler in ogr_sozluk.items():
+                excel_key = f"{e_sofor} / {e_plaka}"
+                if excel_key in tamamlanan_excel_servisleri:
+                    continue  # zaten tamamlandi
                 if e_sofor == sofor and e_plaka == plaka:
                     ogr_listesi = ogrenciler
-                    eslesme_key = f"{e_sofor} / {e_plaka}"
+                    eslesme_key = excel_key
                     break
 
+            # 2. Tam eslesme yoksa sadece plaka ile dene
             if ogr_listesi is None:
                 for (e_sofor, e_plaka), ogrenciler in ogr_sozluk.items():
-                    if e_plaka == plaka and f"{e_sofor} / {e_plaka}" not in islenen_servisler:
+                    excel_key = f"{e_sofor} / {e_plaka}"
+                    if excel_key in tamamlanan_excel_servisleri:
+                        continue
+                    if e_plaka == plaka:
                         ogr_listesi = ogrenciler
-                        eslesme_key = f"{e_sofor} / {e_plaka}"
-                        print(f"  BILGI: Plaka ile eslesti - Excel='{e_sofor}', Site='{sofor}'")
+                        eslesme_key = excel_key
+                        print(f"  BILGI: Sadece plaka eslesti - Excel='{e_sofor}', Site='{sofor}'")
                         break
 
             if ogr_listesi is None:
-                # Bu site satirinda Excel eslesmesi yok, sadece bu satiri atla
-                islenen_servisler.add(servis_key)
-                rapor["servis_raporu"].append({
-                    "servis": servis_key,
-                    "durum": "ATLANDI",
-                    "aciklama": "Excel'de bu servis icin ogrenci bulunamadi"
-                })
-                print(f"  [{idx+1}] {servis_key}: Excel'de bulunamadi, atlandi.")
+                # Tarih uygun ama Excel'de karsiligi yok
+                print(f"  [{idx+1}] {servis_key}: Tarih uygun ama Excel'de eslesme yok.")
+                # Raporda sadece bir kez goster
+                zaten_var = any(r["servis"] == servis_key and r["durum"] == "EXCEL_ESLESME_YOK"
+                                for r in rapor["servis_raporu"])
+                if not zaten_var:
+                    rapor["servis_raporu"].append({
+                        "servis": servis_key,
+                        "durum": "EXCEL_ESLESME_YOK",
+                        "aciklama": f"Tarih uygun ({satir['sofor_bas_str']} - {satir['sofor_bit_str']}) ancak Excel'de karsilik bulunamadi"
+                    })
                 continue
 
-            # Bu Excel servisi zaten islendiyse bu site satirini da atla
-            if eslesme_key in islenen_servisler:
-                islenen_servisler.add(servis_key)
-                continue
-
-            # --- Duzenle butonuna tikla ---
-            print(f"\n  [{idx+1}] {servis_key} isleniyor...")
+            # --- Popup ac ve isle ---
+            print(f"\n  [{idx+1}] {servis_key} isleniyor... (Excel: {eslesme_key})")
             duzenle_btn = satir["duzenle_btn"]
             if duzenle_btn is None:
-                rapor["servis_raporu"].append({
-                    "servis": servis_key,
-                    "durum": "HATA",
-                    "aciklama": "Duzenle butonu bulunamadi"
-                })
+                print(f"    HATA: Duzenle butonu bulunamadi!")
                 rapor["hatalar"].append(f"{servis_key}: Duzenle butonu yok")
-                islenen_servisler.add(servis_key)
+                tamamlanan_excel_servisleri.add(eslesme_key)  # takili kalmamak icin
                 continue
 
             try:
                 guveli_tikla(driver, duzenle_btn, "Duzenle butonu")
             except Exception as e:
-                rapor["servis_raporu"].append({
-                    "servis": servis_key,
-                    "durum": "HATA",
-                    "aciklama": f"Tiklama hatasi: {e}"
-                })
+                print(f"    HATA: Tiklama hatasi: {e}")
                 rapor["hatalar"].append(f"{servis_key}: Tiklama hatasi - {e}")
-                islenen_servisler.add(servis_key)
+                tamamlanan_excel_servisleri.add(eslesme_key)
                 continue
 
-            # --- Popup bekle ---
             print(f"    Popup yukleniyor...")
             if not popup_bekle(driver):
-                rapor["servis_raporu"].append({
-                    "servis": servis_key,
-                    "durum": "HATA",
-                    "aciklama": "Popup acilmadi"
-                })
+                print(f"    HATA: Popup acilmadi!")
                 rapor["hatalar"].append(f"{servis_key}: Popup acilmadi")
-                islenen_servisler.add(servis_key)
+                tamamlanan_excel_servisleri.add(eslesme_key)
                 continue
 
-            # --- Popup bilgilerini logla ---
             try:
                 popup_sofor = driver.find_element(By.ID, "wndOgrenci_C_txtSoforAd").get_attribute("value")
                 popup_plaka = driver.find_element(By.ID, "wndOgrenci_C_txtPlaka").get_attribute("value")
@@ -581,14 +557,12 @@ def otomasyon_calistir(driver, ogr_sozluk):
             except Exception:
                 pass
 
-            # --- Ogrencileri isle ---
             secilen, atlanan_ogr, bulunamayan = popup_ogr_isle(driver, ogr_listesi)
             print(f"    Sonuc: Secilen={secilen}, Atlanan={atlanan_ogr}, Bulunamayan={len(bulunamayan)}")
 
             # Ogrenci raporunu guncelle
             for ogr in ogr_listesi:
-                ogr_temiz = temizle_metin(ogr)
-                if ogr_temiz not in [temizle_metin(b) for b in bulunamayan]:
+                if temizle_metin(ogr) not in [temizle_metin(b) for b in bulunamayan]:
                     rapor["ogrenci_raporu"][ogr] = {
                         "servis": servis_key,
                         "durum": "Servise yerlestirildi"
@@ -599,112 +573,47 @@ def otomasyon_calistir(driver, ogr_sozluk):
                         "durum": "Popup'ta bulunamadi - Manuel giris gerekli"
                     }
 
-            # --- Kaydet ---
             kayit_ok = servisi_kaydet(driver)
 
             if kayit_ok:
                 rapor["servis_raporu"].append({
                     "servis": servis_key,
                     "durum": "TAMAMLANDI",
-                    "aciklama": f"{secilen} ogrenci yerlestirildi"
+                    "aciklama": f"{secilen} ogrenci yerlestirildi (Excel: {eslesme_key})"
                 })
-                islenen_servisler.add(servis_key)
-                if eslesme_key:
-                    islenen_servisler.add(eslesme_key)
-                isleme_yapildi = True
+                tamamlanan_excel_servisleri.add(eslesme_key)
+                islem_yapildi_bu_tur = True
             else:
-                rapor["servis_raporu"].append({
-                    "servis": servis_key,
-                    "durum": "HATA",
-                    "aciklama": "Kaydetme basarisiz"
-                })
                 rapor["hatalar"].append(f"{servis_key}: Kaydetme basarisiz")
-                islenen_servisler.add(servis_key)
+                tamamlanan_excel_servisleri.add(eslesme_key)
 
             time.sleep(2)
-            break  # Tablo yenilendigi icin donguyu kir, while devam eder
+            break  # Tablo yenilendigi icin ic donguyu kir
 
-        if not isleme_yapildi:
-            # Hic islem yapilmadi, tum satirlar tarandı -> bitti
+        if not islem_yapildi_bu_tur:
+            # Bu turde hic islem yapilmadi
+            # Bekleyen Excel servisleri hala var ama web tablosunda eslesme bulunamadi
+            bekleyen_str = [f"{k[0]} / {k[1]}" for k in bekleyenler]
+            print(f"\nBu turde islem yapilmadi.")
+            print(f"Bekleyen ama web tablosunda bulunamayan Excel servisleri:")
+            for s in bekleyen_str:
+                print(f"  - {s}")
+                rapor["servis_raporu"].append({
+                    "servis": s,
+                    "durum": "WEB_TABLOSUNDA_YOK",
+                    "aciklama": "Excel'de tanimli ancak web tablosunda tarih uygun satir bulunamadi"
+                })
+                tamamlanan_excel_servisleri.add(s)
             break
 
     return rapor
-
-
-# ══════════════════════════════════════════════════════════════════
-#  RAPOR
-# ══════════════════════════════════════════════════════════════════
-
-def rapor_yazdir(rapor, cift_isimler):
-    """Otomasyon sonuc raporunu konsola yazdirir."""
-    print("\n")
-    print("=" * 65)
-    print("                   OTOMASYON RAPORU")
-    print("=" * 65)
-
-    # --- SERVİS RAPORU ---
-    print("\n[SERVİS RAPORU]")
-    print("-" * 65)
-    for r in rapor["servis_raporu"]:
-        durum   = r["durum"]
-        servis  = r["servis"]
-        aciklama = r.get("aciklama", "")
-        if durum == "TAMAMLANDI":
-            isaret = "[OK]"
-        elif durum == "ATLANDI":
-            isaret = "[--]"
-        else:
-            isaret = "[!!]"
-        print(f"  {isaret} {servis}")
-        if aciklama:
-            print(f"       -> {aciklama}")
-
-    if not rapor["servis_raporu"]:
-        print("  (islem yapilmadi)")
-
-    # --- ÖĞRENCİ RAPORU ---
-    print("\n[OGRENCİ RAPORU]")
-    print("-" * 65)
-    for ogr, bilgi in rapor["ogrenci_raporu"].items():
-        durum  = bilgi["durum"]
-        servis = bilgi["servis"]
-        if "yerlestirildi" in durum.lower():
-            isaret = "[OK]"
-        else:
-            isaret = "[!!]"
-        print(f"  {isaret} {ogr}")
-        print(f"       -> {durum} ({servis})")
-
-    if not rapor["ogrenci_raporu"]:
-        print("  (ogrenci bilgisi yok)")
-
-    # --- HATALAR ---
-    if rapor["hatalar"]:
-        print(f"\n[HATALAR]")
-        print("-" * 65)
-        for h in rapor["hatalar"]:
-            print(f"  [!!] {h}")
-
-    # --- AYNI İSİMLİ ÖĞRENCİLER ---
-    if cift_isimler:
-        print(f"\n[UYARI - MANUEL KONTROL GEREKLİ]")
-        print("-" * 65)
-        print("  Asagidaki ogrenciler excelde birden fazla kez gecmektedir.")
-        print("  Dogru servise atandiklarini lutfen manuel dogrulayin:")
-        for ad in cift_isimler:
-            print(f"  [!!] {ad}")
-
-    print("\n" + "=" * 65)
-    print("Program tamamlandi.")
-    print("=" * 65)
-
-
 
 def rapor_kaydet(rapor, cift_isimler, excel_yolu):
     """Raporu hem TXT hem Excel dosyasi olarak kaydeder."""
     import os
     zaman = datetime.now().strftime("%Y%m%d_%H%M%S")
-    klasor = os.path.dirname(os.path.abspath(excel_yolu))
+    klasor = os.path.join(os.path.dirname(os.path.abspath(excel_yolu)), "Raporlar")
+    os.makedirs(klasor, exist_ok=True)
     txt_dosya  = os.path.join(klasor, f"mebbis_rapor_{zaman}.txt")
     xlsx_dosya = os.path.join(klasor, f"mebbis_rapor_{zaman}.xlsx")
 
@@ -883,7 +792,6 @@ def main():
         }
 
     # 6. Rapor
-    rapor_yazdir(rapor, cift_isimler)
     rapor_kaydet(rapor, cift_isimler, excel_yolu)
 
     input("\nKapatmak icin ENTER'a basin...")
